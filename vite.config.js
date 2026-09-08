@@ -7,7 +7,13 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     host: true,
-    port: process.env.PORT ? Number(process.env.PORT) : 5175
+    port: process.env.PORT ? Number(process.env.PORT) : 5175,
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_PROXY_TARGET || 'http://localhost:8787',
+        changeOrigin: true
+      }
+    }
   },
   build: {
     outDir: 'dist',

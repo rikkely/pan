@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import config from '../config.js'
 import { fetchList } from '../api/client.js'
 import IconBase from './IconBase.vue'
@@ -10,6 +10,8 @@ const path = ref('/')
 const data = ref(null)
 const loading = ref(true)
 const error = ref(null)
+let requestId = 0
+onUnmounted(() => { requestId += 1 })
 
 const KIND_ICON = {
   doc: 'file-text',
@@ -22,15 +24,20 @@ const KIND_ICON = {
 }
 
 async function load(p) {
+  const id = ++requestId
   loading.value = true
   error.value = null
   try {
-    data.value = await fetchList(p)
+    const result = await fetchList(p)
+    // 快速切换目录时，仅接受最后一次请求，防止旧响应覆盖新路径。
+    if (id !== requestId) return
+    data.value = result
     path.value = p
   } catch (e) {
+    if (id !== requestId) return
     error.value = e?.message || '读取失败'
   } finally {
-    loading.value = false
+    if (id === requestId) loading.value = false
   }
 }
 onMounted(() => load('/'))
@@ -66,6 +73,9 @@ function openEntry(e) {
   if (e.type === 'folder') {
     const next = path.value === '/' ? `/${e.name}` : `${path.value}/${e.name}`
     load(next)
+  } else if (e.downloadUrl) {
+    const url = new URL(e.downloadUrl, location.href)
+    if (['http:', 'https:'].includes(url.protocol)) window.open(url.href, '_blank', 'noopener')
   }
 }
 </script>
@@ -115,6 +125,7 @@ function openEntry(e) {
       <span class="bar__count">[ {{ folderCount }} DIR · {{ fileCount }} FILE ]</span>
     </div>
 
+    <p v-if="data?.meta?.source === 'mock'" class="state">当前展示本地示例目录</p>
     <div v-if="loading" class="state"><span class="spin" />读取扇区…</div>
     <div v-else-if="error" class="state state--err">✕ {{ error }}</div>
     <div v-else-if="!entries.length" class="state">— 空目录 —</div>
@@ -124,6 +135,8 @@ function openEntry(e) {
         :key="e.name"
         class="item"
         :class="{ 'is-folder': e.type === 'folder' }"
+        :disabled="e.type === 'file' && !e.downloadUrl"
+        :title="e.type === 'file' && !e.downloadUrl ? '暂未提供下载地址' : e.name"
         @click="openEntry(e)"
       >
         <span class="item__no">{{ String(i + 1).padStart(2, '0') }}</span>
@@ -136,7 +149,7 @@ function openEntry(e) {
             <span class="item__kind">{{ e.type === 'folder' ? 'DIR' : (e.kind || 'file').toUpperCase() }}</span>
             <span class="item__sep">·</span>
             <span v-if="e.type === 'folder'">{{ e.count }} ITEMS</span>
-            <span v-else>{{ sizeFmt(e.size) }}</span>
+            <span v-else>{{ sizeFmt(e.size) }}{{ !e.downloadUrl ? ' · 暂无下载' : '' }}</span>
             <span class="item__sep">·</span>
             <span>{{ e.modified }}</span>
           </span>
@@ -150,6 +163,7 @@ function openEntry(e) {
 </template>
 
 <style scoped>
+.item:disabled { opacity: 0.55; cursor: not-allowed; }
 .vault {
   width: min(1100px, 94vw);
   margin: 0 auto;

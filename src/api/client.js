@@ -9,10 +9,10 @@
  *  size 单位 KB（folder 可为 0 或子项数）。
  */
 import config from '../config.js'
+import { requestJson } from './request.js'
 
 const MODE = config.api?.mode || 'mock'
-const BASE = config.api?.base || '/api'
-const delay = (ms) => new Promise((r) => setTimeout(r, ms))
+const BASE = (config.api?.base || '/api').replace(/\/+$/, '')
 
 const USAGE = { used: 412.8, total: 1024 } // GB
 
@@ -52,14 +52,18 @@ const TREE = {
   ]
 }
 
-async function http(path) {
-  const res = await fetch(`${BASE}${path}`, { headers: { Accept: 'application/json' } })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res.json()
+function http(path) {
+  return requestJson(`${BASE}${path}`, (data) => typeof data?.path === 'string' && Array.isArray(data.entries) && Number.isFinite(data.usage?.total) && data.usage.total > 0)
 }
 
 export async function fetchList(path = '/') {
-  if (MODE === 'live') return http(`/pan/list?path=${encodeURIComponent(path)}`)
-  await delay(160)
-  return { path, usage: USAGE, entries: TREE[path] || [] }
+  if (MODE === 'live') {
+    try {
+      return await http(`/pan/list?path=${encodeURIComponent(path)}`)
+    } catch (error) {
+      if (error.code === 'DIRECTORY_NOT_FOUND') throw new Error('目录不存在或已移除')
+      if (!config.api?.fallbackToMock) throw error
+    }
+  }
+  return { path, usage: USAGE, entries: TREE[path] || [], meta: { source: 'mock' } }
 }
