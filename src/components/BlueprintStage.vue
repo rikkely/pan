@@ -46,17 +46,21 @@
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(120, 190, 255, 0.12) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(120, 190, 255, 0.12) 1px, transparent 1px);
+    linear-gradient(rgba(120, 190, 255, 0.11) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 190, 255, 0.11) 1px, transparent 1px);
   background-size: 24px 24px;
+  -webkit-mask: radial-gradient(ellipse 85% 75% at 50% 45%, rgba(0, 0, 0, 0.35) 0%, #000 72%);
+  mask: radial-gradient(ellipse 85% 75% at 50% 45%, rgba(0, 0, 0, 0.35) 0%, #000 72%);
 }
 .bp__bold {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(150, 210, 255, 0.22) 1.2px, transparent 1.2px),
-    linear-gradient(90deg, rgba(150, 210, 255, 0.22) 1.2px, transparent 1.2px);
+    linear-gradient(rgba(150, 210, 255, 0.2) 1.2px, transparent 1.2px),
+    linear-gradient(90deg, rgba(150, 210, 255, 0.2) 1.2px, transparent 1.2px);
   background-size: 120px 120px;
+  -webkit-mask: radial-gradient(ellipse 85% 75% at 50% 45%, rgba(0, 0, 0, 0.42) 0%, #000 72%);
+  mask: radial-gradient(ellipse 85% 75% at 50% 45%, rgba(0, 0, 0, 0.42) 0%, #000 72%);
 }
 .bp__deco {
   position: absolute;

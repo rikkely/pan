@@ -3,6 +3,7 @@ import config from './config.js'
 import BlueprintStage from './components/BlueprintStage.vue'
 import PanVault from './components/PanVault.vue'
 import IconBase from './components/IconBase.vue'
+import AuroraDock from './components/AuroraDock.vue'
 
 // 固定蓝图配色（独立风格，不跟随主页主题）
 const s = document.documentElement.style
@@ -48,6 +49,8 @@ const year = new Date().getFullYear()
     <span class="tbf__note">UNAUTHORIZED DUPLICATION PROHIBITED</span>
     <a :href="config.site.homeUrl">◄ RETURN TO CONSOLE</a>
   </footer>
+
+  <AuroraDock active="pan" />
 </template>
 
 <style scoped>
@@ -109,7 +112,7 @@ const year = new Date().getFullYear()
 
 .tbf {
   margin-top: 26px;
-  margin-bottom: 26px;
+  margin-bottom: 84px;
   align-items: center;
   flex-wrap: wrap;
 }

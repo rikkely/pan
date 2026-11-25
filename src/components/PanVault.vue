@@ -10,8 +10,15 @@ const path = ref('/')
 const data = ref(null)
 const loading = ref(true)
 const error = ref(null)
+const q = ref('')
+const sortBy = ref('default') // default | name | size | date
+const viewMode = ref('grid') // grid | list
+const inspected = ref(null)
+const copiedPath = ref(false)
+const searchRef = ref(null)
+
 let requestId = 0
-onUnmounted(() => { requestId += 1 })
+let copyTimer = null
 
 const KIND_ICON = {
   doc: 'file-text',
@@ -27,9 +34,9 @@ async function load(p) {
   const id = ++requestId
   loading.value = true
   error.value = null
+  inspected.value = null
   try {
     const result = await fetchList(p)
-    // 快速切换目录时，仅接受最后一次请求，防止旧响应覆盖新路径。
     if (id !== requestId) return
     data.value = result
     path.value = p
@@ -40,7 +47,34 @@ async function load(p) {
     if (id === requestId) loading.value = false
   }
 }
-onMounted(() => load('/'))
+
+function onKeydown(e) {
+  if (e.key === 'Escape') {
+    if (inspected.value) {
+      inspected.value = null
+    } else if (document.activeElement === searchRef.value) {
+      q.value = ''
+      searchRef.value?.blur()
+    }
+    return
+  }
+  if (e.key === '/' && document.activeElement !== searchRef.value) {
+    const tag = e.target?.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+    e.preventDefault()
+    searchRef.value?.focus()
+  }
+}
+
+onMounted(() => {
+  load('/')
+  window.addEventListener('keydown', onKeydown)
+})
+onUnmounted(() => {
+  requestId += 1
+  clearTimeout(copyTimer)
+  window.removeEventListener('keydown', onKeydown)
+})
 
 const crumbs = computed(() => {
   const parts = path.value.split('/').filter(Boolean)
@@ -53,13 +87,41 @@ const crumbs = computed(() => {
   return acc
 })
 
+function goUp() {
+  if (path.value === '/') return
+  const parts = path.value.split('/').filter(Boolean)
+  parts.pop()
+  load(parts.length ? '/' + parts.join('/') : '/')
+}
+
 const usage = computed(() => data.value?.usage || { used: 0, total: 1 })
 const usedPct = computed(() => Math.min(100, Math.round((usage.value.used / usage.value.total) * 100)))
 const TICKS = 20
 const SEGMENTS = 40
 const litSegments = computed(() => Math.round((usedPct.value / 100) * SEGMENTS))
 
-const entries = computed(() => data.value?.entries || [])
+const rawEntries = computed(() => data.value?.entries || [])
+
+const entries = computed(() => {
+  const s = q.value.trim().toLowerCase()
+  let list = s
+    ? rawEntries.value.filter((e) =>
+        `${e.name} ${e.kind || ''} ${e.type}`.toLowerCase().includes(s)
+      )
+    : [...rawEntries.value]
+
+  if (sortBy.value !== 'default') {
+    list.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
+      if (sortBy.value === 'name') return a.name.localeCompare(b.name, 'zh-CN')
+      if (sortBy.value === 'size') return (b.size || 0) - (a.size || 0)
+      if (sortBy.value === 'date') return String(b.modified || '').localeCompare(String(a.modified || ''))
+      return 0
+    })
+  }
+  return list
+})
+
 const folderCount = computed(() => entries.value.filter((e) => e.type === 'folder').length)
 const fileCount = computed(() => entries.value.filter((e) => e.type === 'file').length)
 
@@ -69,13 +131,36 @@ function sizeFmt(kb) {
   if (kb < 1024 * 1024) return `${(kb / 1024).toFixed(1)} MB`
   return `${(kb / 1024 / 1024).toFixed(2)} GB`
 }
+
+function fullPath(name) {
+  return path.value === '/' ? `/${name}` : `${path.value}/${name}`
+}
+
 function openEntry(e) {
   if (e.type === 'folder') {
-    const next = path.value === '/' ? `/${e.name}` : `${path.value}/${e.name}`
-    load(next)
-  } else if (e.downloadUrl) {
-    const url = new URL(e.downloadUrl, location.href)
-    if (['http:', 'https:'].includes(url.protocol)) window.open(url.href, '_blank', 'noopener')
+    load(fullPath(e.name))
+  } else {
+    inspected.value = { ...e, fullPath: fullPath(e.name) }
+    copiedPath.value = false
+  }
+}
+
+function downloadFile(e) {
+  if (!e?.downloadUrl) return
+  const url = new URL(e.downloadUrl, location.href)
+  if (['http:', 'https:'].includes(url.protocol)) window.open(url.href, '_blank', 'noopener')
+}
+
+async function copyFilePath(fp) {
+  try {
+    await navigator.clipboard?.writeText(fp)
+    copiedPath.value = true
+    clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => {
+      copiedPath.value = false
+    }, 1500)
+  } catch {
+    /* ignore */
   }
 }
 </script>
@@ -110,9 +195,12 @@ function openEntry(e) {
       </div>
     </header>
 
-    <!-- 工具条：路径 -->
+    <!-- 工具条：路径 + 搜索 + 排序 + 视图切换 -->
     <div class="bar">
       <nav class="crumbs">
+        <button v-if="path !== '/'" class="crumb crumb--up" title="返回上级目录" @click="goUp">
+          <IconBase name="arrow-up" :size="12" />上级
+        </button>
         <span class="crumbs__lbl">PATH</span>
         <button class="crumb" :class="{ 'is-cur': path === '/' }" @click="load('/')">
           <IconBase name="hard-drive" :size="13" />ROOT
@@ -122,26 +210,73 @@ function openEntry(e) {
           <button class="crumb" :class="{ 'is-cur': c.path === path }" @click="load(c.path)">{{ c.name }}</button>
         </template>
       </nav>
-      <span class="bar__count">[ {{ folderCount }} DIR · {{ fileCount }} FILE ]</span>
+
+      <div class="bar__right">
+        <span class="bar__count">[ {{ folderCount }} DIR · {{ fileCount }} FILE ]</span>
+      </div>
     </div>
 
-    <p v-if="data?.meta?.source === 'mock'" class="state">当前展示本地示例目录</p>
+    <div class="controls">
+      <label class="search">
+        <IconBase name="search" :size="14" />
+        <input
+          ref="searchRef"
+          v-model="q"
+          type="text"
+          placeholder="过滤文件名或类型… (按 / 聚焦)"
+          spellcheck="false"
+        />
+        <button v-if="q" class="search__clear" type="button" aria-label="清除" @click="q = ''">
+          <IconBase name="x" :size="13" />
+        </button>
+      </label>
+
+      <div class="controls__opts">
+        <select v-model="sortBy" class="sort" aria-label="排序方式">
+          <option value="default">排序: 默认</option>
+          <option value="name">排序: 名称</option>
+          <option value="size">排序: 大小</option>
+          <option value="date">排序: 日期</option>
+        </select>
+
+        <div class="vtoggle" role="group" aria-label="视图切换">
+          <button
+            class="vtoggle__b"
+            :class="{ 'is-on': viewMode === 'grid' }"
+            title="网格视图"
+            @click="viewMode = 'grid'"
+          >
+            <IconBase name="grid" :size="14" />
+          </button>
+          <button
+            class="vtoggle__b"
+            :class="{ 'is-on': viewMode === 'list' }"
+            title="列表视图"
+            @click="viewMode = 'list'"
+          >
+            <IconBase name="list" :size="14" />
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <p v-if="data?.meta?.source === 'mock'" class="mocktip">当前展示本地示例目录</p>
     <div v-if="loading" class="state"><span class="spin" />读取扇区…</div>
     <div v-else-if="error" class="state state--err">✕ {{ error }}</div>
-    <div v-else-if="!entries.length" class="state">— 空目录 —</div>
-    <div v-else class="grid">
+    <div v-else-if="!entries.length" class="state">— 无匹配项目 —</div>
+
+    <!-- 网格 / 列表视图 -->
+    <div v-else :class="viewMode === 'grid' ? 'grid' : 'listview'">
       <button
         v-for="(e, i) in entries"
         :key="e.name"
         class="item"
-        :class="{ 'is-folder': e.type === 'folder' }"
-        :disabled="e.type === 'file' && !e.downloadUrl"
-        :title="e.type === 'file' && !e.downloadUrl ? '暂未提供下载地址' : e.name"
+        :class="{ 'is-folder': e.type === 'folder', 'is-list': viewMode === 'list' }"
         @click="openEntry(e)"
       >
         <span class="item__no">{{ String(i + 1).padStart(2, '0') }}</span>
         <span class="item__icon">
-          <IconBase :name="e.type === 'folder' ? 'folder' : (KIND_ICON[e.kind] || 'file')" :size="18" />
+          <IconBase :name="e.type === 'folder' ? 'folder' : (KIND_ICON[e.kind] || 'file')" :size="17" />
         </span>
         <span class="item__main">
           <span class="item__name">{{ e.name }}</span>
@@ -149,25 +284,83 @@ function openEntry(e) {
             <span class="item__kind">{{ e.type === 'folder' ? 'DIR' : (e.kind || 'file').toUpperCase() }}</span>
             <span class="item__sep">·</span>
             <span v-if="e.type === 'folder'">{{ e.count }} ITEMS</span>
-            <span v-else>{{ sizeFmt(e.size) }}{{ !e.downloadUrl ? ' · 暂无下载' : '' }}</span>
+            <span v-else>{{ sizeFmt(e.size) }}</span>
             <span class="item__sep">·</span>
             <span>{{ e.modified }}</span>
           </span>
         </span>
+        <span class="item__badge" v-if="e.type === 'file'">
+          {{ e.downloadUrl ? 'ONLINE' : 'INDEX' }}
+        </span>
         <span class="item__go">
-          <IconBase :name="e.type === 'folder' ? 'chevron-right' : 'download'" :size="15" />
+          <IconBase :name="e.type === 'folder' ? 'chevron-right' : 'file-text'" :size="15" />
         </span>
       </button>
     </div>
+
+    <!-- 蓝图文件规格检视面板 -->
+    <Teleport to="body">
+      <Transition name="spec">
+        <div
+          v-if="inspected"
+          class="spec-mask"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="inspected.name"
+          @click.self="inspected = null"
+        >
+          <div class="spec">
+            <header class="spec__head">
+              <span class="spec__kicker">▦ CAD SPEC SHEET // FILE INSPECTOR</span>
+              <button class="spec__close" aria-label="关闭" @click="inspected = null">
+                <IconBase name="x" :size="15" />
+              </button>
+            </header>
+
+            <div class="spec__title">
+              <span class="spec__ico">
+                <IconBase :name="KIND_ICON[inspected.kind] || 'file'" :size="20" />
+              </span>
+              <div>
+                <h2>{{ inspected.name }}</h2>
+                <p>{{ inspected.fullPath }}</p>
+              </div>
+            </div>
+
+            <dl class="spec__rows">
+              <div><dt>TYPE</dt><dd>{{ (inspected.kind || 'file').toUpperCase() }}</dd></div>
+              <div><dt>SIZE</dt><dd>{{ sizeFmt(inspected.size) }}</dd></div>
+              <div><dt>MODIFIED</dt><dd>{{ inspected.modified }}</dd></div>
+              <div><dt>NODE STATUS</dt><dd>{{ inspected.downloadUrl ? 'READY FOR TRANSFER' : 'OFFLINE ARCHIVE INDEX' }}</dd></div>
+            </dl>
+
+            <footer class="spec__foot">
+              <button class="spec__btn" @click="copyFilePath(inspected.fullPath)">
+                <IconBase :name="copiedPath ? 'check' : 'copy'" :size="14" />
+                <span>{{ copiedPath ? '已复制路径' : '复制路径' }}</span>
+              </button>
+              <button
+                v-if="inspected.downloadUrl"
+                class="spec__btn spec__btn--primary"
+                @click="downloadFile(inspected)"
+              >
+                <IconBase name="download" :size="14" />
+                <span>下载文件</span>
+              </button>
+              <span v-else class="spec__offline">离线归档节点 · 仅目录索引</span>
+            </footer>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
-.item:disabled { opacity: 0.55; cursor: not-allowed; }
 .vault {
   width: min(1100px, 94vw);
   margin: 0 auto;
-  padding: clamp(20px, 3.5vh, 38px) 0 40px;
+  padding: clamp(20px, 3.5vh, 36px) 0 36px;
   font-family: var(--font-mono);
 }
 
@@ -178,7 +371,7 @@ function openEntry(e) {
   align-items: end;
   gap: 24px;
   padding-bottom: 18px;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
   border-bottom: 1px dashed color-mix(in srgb, var(--accent-a) 40%, transparent);
 }
 .vh__kicker {
@@ -246,7 +439,7 @@ function openEntry(e) {
 .gauge__bar {
   display: flex;
   gap: 2px;
-  height: 22px;
+  height: 20px;
 }
 .gauge__seg {
   flex: 1;
@@ -279,8 +472,8 @@ function openEntry(e) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
-  margin-bottom: 16px;
   padding: 8px 0;
 }
 .crumbs {
@@ -299,11 +492,16 @@ function openEntry(e) {
 .crumb {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   padding: 4px 9px;
   color: var(--text-dim);
   border: 1px solid transparent;
-  transition: color 0.25s, border-color 0.25s;
+  transition: color 0.25s, border-color 0.25s, background 0.25s;
+}
+.crumb--up {
+  color: var(--accent-c);
+  border-color: color-mix(in srgb, var(--accent-c) 35%, transparent);
+  background: color-mix(in srgb, var(--accent-c) 8%, transparent);
 }
 .crumb:hover {
   color: var(--text);
@@ -323,11 +521,101 @@ function openEntry(e) {
   color: var(--accent-a);
 }
 
-/* grid — schematic blocks */
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0 18px;
+}
+.search {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  color: var(--text-dim);
+  background: rgba(8, 24, 50, 0.55);
+  border: 1px solid color-mix(in srgb, var(--accent-a) 28%, transparent);
+  transition: border-color 0.25s, color 0.25s;
+}
+.search:focus-within {
+  border-color: var(--accent-a);
+  color: var(--accent-a);
+}
+.search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+.search input::placeholder {
+  color: var(--text-dim);
+}
+.search__clear {
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+}
+.search__clear:hover {
+  color: var(--accent-a);
+}
+
+.controls__opts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sort {
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-soft);
+  background: rgba(8, 24, 50, 0.65);
+  border: 1px solid color-mix(in srgb, var(--accent-a) 28%, transparent);
+  outline: none;
+  cursor: pointer;
+}
+.vtoggle {
+  display: inline-flex;
+  border: 1px solid color-mix(in srgb, var(--accent-a) 28%, transparent);
+  background: rgba(8, 24, 50, 0.55);
+}
+.vtoggle__b {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  color: var(--text-dim);
+  transition: color 0.2s, background 0.2s;
+}
+.vtoggle__b.is-on {
+  color: #071732;
+  background: var(--accent-a);
+}
+
+.mocktip {
+  margin-bottom: 12px;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+/* grid & list views */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
   gap: 10px;
+}
+.listview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .item {
   position: relative;
@@ -338,8 +626,13 @@ function openEntry(e) {
   text-align: left;
   color: var(--text);
   border: 1px solid color-mix(in srgb, var(--accent-a) 25%, transparent);
-  background: rgba(10, 28, 56, 0.4);
+  background: rgba(10, 28, 56, 0.45);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   transition: border-color 0.25s, box-shadow 0.25s, transform 0.25s var(--ease-out), background 0.25s;
+}
+.item.is-list {
+  padding: 9px 14px;
 }
 .item::before {
   content: '';
@@ -354,7 +647,7 @@ function openEntry(e) {
   border-color: var(--accent-a);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-a) 30%, transparent),
     0 12px 30px -22px color-mix(in srgb, var(--accent-a) 95%, transparent);
-  background: rgba(14, 40, 78, 0.5);
+  background: rgba(14, 40, 78, 0.56);
 }
 .item:hover::before {
   border-color: color-mix(in srgb, var(--accent-a) 30%, transparent);
@@ -363,6 +656,9 @@ function openEntry(e) {
   font-size: 0.56rem;
   color: var(--text-dim);
   align-self: flex-start;
+}
+.item.is-list .item__no {
+  align-self: center;
 }
 .item__icon {
   display: grid;
@@ -383,6 +679,12 @@ function openEntry(e) {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+.item.is-list .item__main {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 .item__name {
   font-family: var(--font-sans);
@@ -409,6 +711,12 @@ function openEntry(e) {
 .item__sep {
   opacity: 0.5;
 }
+.item__badge {
+  font-size: 0.52rem;
+  padding: 2px 6px;
+  color: var(--text-dim);
+  border: 1px solid color-mix(in srgb, var(--accent-a) 22%, transparent);
+}
 .item__go {
   color: var(--text-dim);
   opacity: 0;
@@ -419,6 +727,130 @@ function openEntry(e) {
   opacity: 1;
   transform: translateX(0);
   color: var(--accent-a);
+}
+
+/* spec inspector modal */
+.spec-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 12, 28, 0.76);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+.spec {
+  width: min(480px, 92vw);
+  padding: 18px 20px;
+  font-family: var(--font-mono);
+  background: rgba(8, 24, 50, 0.94);
+  border: 1px solid color-mix(in srgb, var(--accent-a) 45%, transparent);
+  box-shadow: 0 28px 70px -16px rgba(0, 0, 0, 0.85),
+    0 0 36px -14px color-mix(in srgb, var(--accent-a) 45%, transparent);
+}
+.spec__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent-a) 30%, transparent);
+}
+.spec__kicker {
+  font-size: 0.62rem;
+  letter-spacing: 1.4px;
+  color: var(--accent-a);
+}
+.spec__close {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: var(--text-soft);
+  border: 1px solid color-mix(in srgb, var(--accent-a) 28%, transparent);
+}
+.spec__close:hover {
+  color: var(--accent-a);
+}
+.spec__title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+.spec__ico {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  color: var(--accent-a);
+  border: 1px solid color-mix(in srgb, var(--accent-a) 42%, transparent);
+}
+.spec__title h2 {
+  font-family: var(--font-sans);
+  font-size: 1.06rem;
+  color: #fff;
+  word-break: break-all;
+}
+.spec__title p {
+  margin-top: 3px;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+.spec__rows {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 12px;
+  background: rgba(5, 16, 36, 0.55);
+  border: 1px solid color-mix(in srgb, var(--accent-a) 20%, transparent);
+}
+.spec__rows dt {
+  font-size: 0.54rem;
+  letter-spacing: 1.2px;
+  color: var(--text-dim);
+}
+.spec__rows dd {
+  margin-top: 3px;
+  font-size: 0.76rem;
+  color: var(--text);
+}
+.spec__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+.spec__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 13px;
+  font-size: 0.72rem;
+  color: var(--accent-a);
+  border: 1px solid color-mix(in srgb, var(--accent-a) 40%, transparent);
+  background: color-mix(in srgb, var(--accent-a) 10%, transparent);
+}
+.spec__btn--primary {
+  color: #071732;
+  background: var(--accent-a);
+  font-weight: 700;
+}
+.spec__offline {
+  font-size: 0.68rem;
+  color: var(--accent-c);
+}
+
+.spec-enter-active,
+.spec-leave-active {
+  transition: opacity 0.2s var(--ease-out);
+}
+.spec-enter-from,
+.spec-leave-to {
+  opacity: 0;
 }
 
 /* states */
@@ -454,6 +886,11 @@ function openEntry(e) {
   }
   .gauge {
     width: 100%;
+  }
+  .item.is-list .item__main {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
   }
 }
 </style>
